@@ -17,6 +17,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+    defaults:
+      run:
+        working-directory: ./server
 
     steps:
       - name: Checkout
@@ -30,19 +33,21 @@ jobs:
           cache-dependency-path: server/package-lock.json
 
       - name: Install dependencies
-        run: |
-          cd server
-          npm ci
+        run: npm ci
 
       - name: Typecheck
-        run: |
-          cd server
-          npm run typecheck
+        run: npm run typecheck
 
-      - name: Install selflare
+      - name: Cache selflare
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/node_modules/selflare
+          key: selflare-${{ hashFiles('package-lock.json') }}
+          restore-keys: selflare-
+
+      - name: Install selflare (if not cached)
         run: |
-          cd server
-          npm install -g selflare
+          npm ls -g selflare 2>/dev/null || npm install -g selflare
 
       # selflare's default -d list only covers cache/kv/d1/r2. This worker
       # (wrangler.toml) only declares Durable Object bindings, so the only
@@ -51,7 +56,6 @@ jobs:
       # safe to pass all five every time even as the worker evolves.
       - name: Compile worker to Cap'n Proto
         run: |
-          cd server
           selflare compile \
             -d cache:storage=./cache \
             -d kv:storage=./kv \
@@ -60,9 +64,7 @@ jobs:
             -d do:storage=./do
 
       - name: Generate Dockerfile and docker-compose.yml
-        run: |
-          cd server
-          selflare docker
+        run: selflare docker
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -78,8 +80,6 @@ jobs:
 
       - name: Smoke test container
         run: |
-          cd server
-
           mkdir -p .storage/{cache,kv,d1,r2,do}
 
           docker run -d --name yaos-smoke \
@@ -93,7 +93,6 @@ jobs:
 
           echo "Waiting for worker to come up..."
           for i in $(seq 1 30); do
-            # Check if container is still alive before trying curl
             if ! docker inspect yaos-smoke --format '{{.State.Running}}' | grep -q true; then
               echo "Container exited on attempt $i — showing logs:"
               docker logs yaos-smoke
@@ -120,7 +119,6 @@ jobs:
           curl -fsS http://localhost:8080/api/capabilities | tee /tmp/capabilities.json
           echo
 
-          # Fail loudly if the response isn't valid JSON (e.g. a crash page).
           node -e "JSON.parse(require('fs').readFileSync('/tmp/capabilities.json', 'utf8'))"
 
           echo "--- container logs ---"
@@ -131,6 +129,7 @@ jobs:
         run: docker rm -f yaos-smoke || true
 
       - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -138,6 +137,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Push Docker image
+        if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
         with:
           context: ./server
