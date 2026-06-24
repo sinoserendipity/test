@@ -1,6 +1,6 @@
 name = "yaos"
 main = "src/index.ts"
-compatibility_date = "2026-03-02"
+compatibility_date = "2026-01-22"
 
 [[durable_objects.bindings]]
 name = "YAOS_SYNC"
@@ -16,6 +16,11 @@ new_sqlite_classes = ["VaultSyncServer", "ServerConfig"]
 
 [observability.logs]
 enabled = true
+
+# 加上 R2 绑定配置
+[[r2_buckets]]
+binding = "YAOS_BUCKET"
+bucket_name = "yaos"
 
 # ---------------------------------------------------------------------------
 # Optional hardening variables
