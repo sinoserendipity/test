@@ -68,22 +68,19 @@ jobs:
       # never includes "do", regardless of what worker.capnp actually
       # declares — and it never drops a binding that genuinely isn't used
       # either. Instead of hardcoding which bindings this worker has (which
-      # silently goes stale the moment a binding is added or removed — this
-      # is exactly what happened when the r2 binding was added but the
-      # smoke-test mounts weren't updated to match), detect the real list
-      # directly from the compiled worker.capnp and regenerate the volumes
-      # section from it.
+      # silently goes stale the moment a binding is added or removed), detect
+      # the real list directly from the compiled worker.capnp and regenerate
+      # the volumes section from it.
       - name: Patch docker-compose.yml from actual worker.capnp bindings
         run: |
           cd server
+
           BINDINGS=$(strings worker.capnp | grep -oE '^(cache|kv|d1|r2|do):storage$' | sort -u | sed -E 's/:storage$//')
           echo "Detected storage bindings:"
           echo "$BINDINGS"
-          if [ -z "$BINDINGS" ]; then
-            echo "No disk-backed storage bindings found in worker.capnp — nothing to mount."
-          fi
 
-          python3 - "$BINDINGS" <<'PYEOF'
+          if [ -n "$BINDINGS" ]; then
+            python3 - "$BINDINGS" <<'PYEOF'
           import sys
 
           names = [n for n in sys.argv[1].splitlines() if n.strip()]
@@ -115,6 +112,7 @@ jobs:
           with open("docker-compose.yml", "w") as f:
               f.writelines(out)
           PYEOF
+          fi
 
           echo "--- final docker-compose.yml ---"
           cat docker-compose.yml
@@ -126,6 +124,16 @@ jobs:
             echo "$BINDINGS"
             echo "EOF"
           } >> "$GITHUB_ENV"
+
+      # selflare docker only creates /worker/{cache,kv,d1,r2} dirs in the
+      # Dockerfile. Add mkdir for all possible storage bindings — mkdir -p
+      # is a no-op for dirs that already exist, so it's always safe.
+      - name: Ensure storage dirs in Dockerfile
+        run: |
+          cd server
+          sed -i '/^CMD\|^ENTRYPOINT/i RUN mkdir -p /worker/cache /worker/kv /worker/d1 /worker/r2 /worker/do' Dockerfile
+          echo "--- final Dockerfile ---"
+          cat Dockerfile
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -141,6 +149,8 @@ jobs:
 
       - name: Smoke test container
         run: |
+          cd server
+
           MOUNT_ARGS=()
           while IFS= read -r name; do
             [ -z "$name" ] && continue
@@ -157,12 +167,20 @@ jobs:
 
           echo "Waiting for worker to come up..."
           for i in $(seq 1 30); do
-            if curl -fsS http://localhost:8080/ -o /tmp/home.html; then
+            # Check if container is still alive before trying curl
+            if ! docker inspect yaos-smoke --format '{{.State.Running}}' | grep -q true; then
+              echo "Container exited on attempt $i — showing logs:"
+              docker logs yaos-smoke
+              exit 1
+            fi
+
+            if curl -fsS http://localhost:8080/ -o /tmp/home.html 2>/dev/null; then
               echo "Worker responded on attempt $i"
               break
             fi
+
             if [ "$i" -eq 30 ]; then
-              echo "Worker never responded"
+              echo "Worker never responded after 30 attempts"
               docker logs yaos-smoke
               exit 1
             fi
